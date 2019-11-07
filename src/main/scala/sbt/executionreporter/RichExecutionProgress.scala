@@ -33,13 +33,13 @@ private[sbt] class RichExecutionProgress extends ExecuteProgress[Task] {
   private[this] val anonOwners = new ConcurrentHashMap[Task[_], Task[_]]
   private[this] val data = new ConcurrentHashMap[Task[_], TaskTiming]
 
-  type S = Unit
-  def initial: S = {
+  override def initial: Unit = {
     data.clear()
     calledBy.clear()
     anonOwners.clear()
   }
-  def registered(state: S, task: Task[_], allDeps: Iterable[Task[_]], pendingDeps: Iterable[Task[_]]): S = {
+
+  override def afterRegistered(task: Task[_], allDeps: Iterable[Task[_]], pendingDeps: Iterable[Task[_]]): Unit = {
     pendingDeps foreach { t ⇒ if (TaskName.transformNode(t).isEmpty) anonOwners.put(t, task) }
     if (data.containsKey(task))
       updateData(task)(d ⇒ d.copy(task, deps = d.deps ++ allDeps.toSeq, registerTime = theTime()))
@@ -47,8 +47,10 @@ private[sbt] class RichExecutionProgress extends ExecuteProgress[Task] {
       data.put(task, TaskTiming(task, mappedName(task), deps = allDeps.toSeq, registerTime = theTime()))
   }
 
-  def ready(state: S, task: Task[_]): S = updateData(task)(_.copy(readyTime = theTime()))
-  def workStarting(task: Task[_]): Unit = {
+  override def afterReady(task: Task[_]): Unit =
+    updateData(task)(_.copy(readyTime = theTime()))
+
+  override def beforeWork(task: Task[_]): Unit = {
     val listener = new DownloadListener {
       def downloadOccurred(download: NetworkAccess): Unit = updateData(task)(d ⇒ d.copy(downloads = d.downloads :+ download))
     }
@@ -61,7 +63,7 @@ private[sbt] class RichExecutionProgress extends ExecuteProgress[Task] {
     updateData(task)(_.copy(startTime = theTime(), threadId = Thread.currentThread().getId))
   }
 
-  def workFinished[T](task: Task[T], result: Either[Task[T], Result[T]]): Unit = {
+  def afterWork[T](task: Task[T], result: Either[Task[T], Result[T]]): Unit = {
     IvyDownloadReporter.listener.set(null)
     IvyLockReporter.listener.set(null)
     updateData(task)(_.copy(finishTime = theTime()))
@@ -70,8 +72,13 @@ private[sbt] class RichExecutionProgress extends ExecuteProgress[Task] {
       data.put(t, TaskTiming(t, mappedName(t), deps = Seq(task)))
     }
   }
-  def completed[T](state: S, task: Task[T], result: Result[T]): S = updateData(task)(_.copy(completeTime = theTime()))
-  def allCompleted(state: S, results: RMap[Task, Result]): S = ExecutionProgressReporter.report(data)
+
+  override def afterCompleted[A](task: Task[A], result: Result[A]): Unit = updateData(task)(_.copy(completeTime = theTime()))
+
+  override def afterAllCompleted(results: RMap[Task, Result]): Unit =
+    ExecutionProgressReporter.report(data)
+
+  override def stop(): Unit = ()
 
   def theTime(): Option[Long] = Some(System.nanoTime())
 
@@ -100,5 +107,6 @@ private[sbt] class RichExecutionProgress extends ExecuteProgress[Task] {
 }
 
 object RichExecutionProgress {
-  val install: sbt.Def.Setting[_] = Keys.executeProgress := (_ ⇒ new Keys.TaskProgress(new RichExecutionProgress))
+  val install: sbt.Def.Setting[_] = Keys.progressReports :=
+    Keys.progressReports.value :+ new Keys.TaskProgress(new RichExecutionProgress)
 }
